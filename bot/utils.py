@@ -1,47 +1,54 @@
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import ContextTypes
-from database.models import Quest, QuestSubmission
+from database.models import Quest, Submission
 from config import QUEST_ID_PREFIX
+import re
+from typing import Optional
 
-async def send_quest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, quest: Quest, step: int):
-    """
-    Sends a quest step message to the user
-    """
-    if step < len(quest.steps):
-        step_data = quest.steps[step]
-        await update.callback_query.message.edit_text(
-            f"Quest: {quest.title}\n\nStep {step + 1}: {step_data['description']}",
-            reply_markup=get_quest_keyboard(quest.id, step)
+async def send_quest_message(update: Update, quest: Quest):
+    """Send a quest message with proper formatting"""
+    message = await format_quest_message(quest)
+    
+    if quest.image_url:
+        await update.message.reply_photo(
+            photo=quest.image_url,
+            caption=message,
+            parse_mode='Markdown'
         )
     else:
-        await update.callback_query.message.edit_text(
-            f"Congratulations! You've completed the quest: {quest.title}",
-            reply_markup=get_main_keyboard()
+        await update.message.reply_text(
+            message,
+            parse_mode='Markdown'
         )
 
 async def format_quest_message(quest: Quest) -> str:
     """Format a quest message for display"""
-    return (
-        f"Quest: {quest.title}\n"
-        f"ID: {quest.id}\n"
-        f"Description: {quest.description}\n"
-        f"Status: {quest.status}"
-    )
+    message = f"🎯 *{quest.title}*\n\n"
+    message += f"🔑 Code: `{quest.quest_code}`\n"
+    message += f"⭐ Points: {quest.points}\n\n"
+    message += f"📝 {quest.description}\n\n"
+    
+    if quest.deadline:
+        message += f"⏰ Deadline: {quest.deadline.strftime('%Y-%m-%d %H:%M')}\n"
+    
+    return message
 
-async def format_submission_message(submission: QuestSubmission) -> str:
+async def format_submission_message(submission: Submission) -> str:
     """Format a submission message for display"""
-    return (
-        f"Submission ID: {submission.id}\n"
-        f"Quest ID: {submission.quest_id}\n"
-        f"Status: {submission.status}\n"
-        f"Submitted at: {submission.submitted_at}"
-    )
+    message = f"📝 *Submission*\n\n"
+    message += f"User: {submission.user_id}\n"
+    message += f"Quest: {submission.quest.title} ({submission.quest.quest_code})\n\n"
+    message += f"Submission:\n{submission.submission_text}\n\n"
+    
+    if submission.submission_media:
+        message += "📎 Attachments:\n"
+        for media in submission.submission_media:
+            message += f"- {media}\n"
+    
+    return message
 
-async def extract_quest_id(text: str) -> str:
-    """Extract quest ID from message text"""
-    if QUEST_ID_PREFIX in text:
-        parts = text.split(QUEST_ID_PREFIX)
-        if len(parts) > 1:
-            quest_id = parts[1].split()[0]
-            return f"{QUEST_ID_PREFIX}{quest_id}"
-    return None 
+async def extract_quest_code(text: str) -> Optional[str]:
+    """Extract quest code from text"""
+    # Look for code in format: QUEST123 or #QUEST123
+    match = re.search(r'(?:#)?([A-Z0-9]{3,})', text)
+    return match.group(1) if match else None 

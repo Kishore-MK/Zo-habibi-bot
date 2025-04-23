@@ -1,12 +1,13 @@
 import logging
 from telegram import Update, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from database.models import User, Quest, UserProgress, QuestSubmission
+from database.models import User, Quest, Submission, LeaderboardEntry
 from database.supabase import get_client
 from .keyboards import get_main_keyboard, get_approval_keyboard, get_quest_list_keyboard
-from config import ADMIN_GROUP_ID, USER_GROUP_ID, QUEST_ID_PREFIX
-from .utils import send_quest_message, format_quest_message, format_submission_message, extract_quest_id
+from config import ADMIN_GROUP_ID, USER_GROUP_ID
+from .utils import send_quest_message, format_quest_message, format_submission_message, extract_quest_code
 from datetime import datetime
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Start command from user {update.effective_user.id}")
     user = await User.get_or_create(
         telegram_id=update.effective_user.id,
-        username=update.effective_user.username
+        username=update.effective_user.username,
+        first_name=update.effective_user.first_name,
+        last_name=update.effective_user.last_name
     )
     
     is_admin = update.effective_chat.id == ADMIN_GROUP_ID
@@ -32,8 +35,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "This bot manages quests between admins and users.\n\n"
         "For Users:\n"
         "- View active quests\n"
-        "- Submit quests with their ID\n"
-        "- Track your submissions\n\n"
+        "- Submit quests with their code\n"
+        "- Track your submissions and points\n\n"
         "For Admins:\n"
         "- Create new quests\n"
         "- Review submissions\n"
@@ -49,30 +52,42 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Check if message contains a quest
     if update.message.text:
         # Parse quest details
-        parts = update.message.text.split('\n', 2)
-        if len(parts) >= 2:
+        parts = update.message.text.split('\n', 3)
+        if len(parts) >= 3:
             title = parts[0].strip()
             description = parts[1].strip()
+            quest_code = parts[2].strip()
             
             # Check for deadline in the format "Deadline: YYYY-MM-DD HH:MM"
             deadline = None
-            if len(parts) > 2:
-                deadline_text = parts[2].strip()
-                if deadline_text.startswith('Deadline:'):
-                    try:
-                        deadline_str = deadline_text.replace('Deadline:', '').strip()
-                        deadline = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M')
-                    except ValueError:
-                        await update.message.reply_text(
-                            "Invalid deadline format. Please use: Deadline: YYYY-MM-DD HH:MM"
-                        )
-                        return
+            points = 10  # Default points
+            if len(parts) > 3:
+                for line in parts[3:]:
+                    if line.startswith('Deadline:'):
+                        try:
+                            deadline_str = line.replace('Deadline:', '').strip()
+                            deadline = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M')
+                        except ValueError:
+                            await update.message.reply_text(
+                                "Invalid deadline format. Please use: Deadline: YYYY-MM-DD HH:MM"
+                            )
+                            return
+                    elif line.startswith('Points:'):
+                        try:
+                            points = int(line.replace('Points:', '').strip())
+                        except ValueError:
+                            await update.message.reply_text(
+                                "Invalid points format. Please use: Points: [number]"
+                            )
+                            return
             
             # Store pending quest
             context.user_data['pending_quest'] = {
                 'title': title,
                 'description': description,
-                'deadline': deadline
+                'quest_code': quest_code,
+                'deadline': deadline,
+                'points': points
             }
             
             # Get image if attached
@@ -84,7 +99,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data['pending_quest']['image_url'] = image_url
             
             # Send confirmation message
-            message = f"Create new quest?\n\nTitle: {title}\nDescription: {description}"
+            message = f"Create new quest?\n\nTitle: {title}\nDescription: {description}\nCode: {quest_code}\nPoints: {points}"
             if deadline:
                 message += f"\nDeadline: {deadline.strftime('%Y-%m-%d %H:%M')}"
             
@@ -102,7 +117,9 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Please provide quest details in the format:\n"
                 "Title\n"
                 "Description\n"
-                "Deadline: YYYY-MM-DD HH:MM (optional)\n\n"
+                "Quest Code\n"
+                "Deadline: YYYY-MM-DD HH:MM (optional)\n"
+                "Points: [number] (optional, default 10)\n\n"
                 "You can also attach an image to the message."
             )
 
@@ -114,18 +131,19 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     message_text = update.message.text
     logger.info(f"User message from {update.effective_user.id}: {message_text}")
     
-    # Check if message contains a quest ID
-    quest_id = await extract_quest_id(message_text)
-    if quest_id:
-        quest = await Quest.get_quest(quest_id)
+    # Check if message contains a quest code
+    quest_code = await extract_quest_code(message_text)
+    if quest_code:
+        quest = await Quest.get_by_code(quest_code)
         
         if quest:
-            logger.info(f"Creating submission for quest {quest_id} by user {update.effective_user.id}")
+            logger.info(f"Creating submission for quest {quest_code} by user {update.effective_user.id}")
             # Create submission
-            submission = await QuestSubmission.create(
+            submission = await Submission.create(
                 quest_id=quest.id,
                 user_id=update.effective_user.id,
-                submission_text=message_text
+                submission_text=message_text,
+                original_message_id=update.message.message_id
             )
             
             # Forward to admin group with approval buttons
@@ -137,7 +155,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
-                text=f"New submission for quest {quest.title} ({quest.id})",
+                text=f"New submission for quest {quest.title} ({quest.quest_code})",
                 reply_to_message_id=forwarded_msg.message_id,
                 reply_markup=get_approval_keyboard(submission.id)
             )
@@ -154,17 +172,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get the pending quest from context
         pending_quest = context.user_data.get('pending_quest')
         if pending_quest:
+            # Ensure admin user exists
+            admin = await User.get_or_create(
+                telegram_id=query.from_user.id,
+                username=query.from_user.username,
+                first_name=query.from_user.first_name,
+                last_name=query.from_user.last_name,
+                is_admin=True
+            )
+            
             # Get image URL if available
-            image_url = None
-            if pending_quest.get('image_url'):
-                image_url = pending_quest['image_url']
+            image_url = pending_quest.get('image_url')
             
             # Create the quest in Supabase
             quest = await Quest.create(
                 title=pending_quest['title'],
                 description=pending_quest['description'],
-                created_by=query.from_user.id,
-                image_url=image_url
+                quest_code=pending_quest['quest_code'],
+                image_url=image_url,
+                deadline=pending_quest['deadline'],
+                points=pending_quest['points'],
+                created_by=admin.telegram_id
             )
             
             # Send confirmation with image if available
@@ -174,7 +202,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=image_url,
                     caption=f"Quest created successfully!\n\n"
                            f"Title: {quest.title}\n"
-                           f"ID: {quest.id}\n"
+                           f"Code: {quest.quest_code}\n"
+                           f"Points: {quest.points}\n"
                            f"Description: {quest.description}",
                     reply_markup=get_main_keyboard(is_admin=True)
                 )
@@ -182,7 +211,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.edit_text(
                     f"Quest created successfully!\n\n"
                     f"Title: {quest.title}\n"
-                    f"ID: {quest.id}\n"
+                    f"Code: {quest.quest_code}\n"
+                    f"Points: {quest.points}\n"
                     f"Description: {quest.description}",
                     reply_markup=get_main_keyboard(is_admin=True)
                 )
@@ -202,29 +232,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == "view_quests":
         # Get active quests
-        client = get_client()
-        quests = client.table('quests').select('*').eq('status', 'active').execute()
+        quests = await Quest.get_active()
         
-        if quests.data:
+        if quests:
             # Send each quest with its image if available
-            for quest in quests.data:
-                quest_obj = Quest(**quest)
-                if quest_obj.image_url:
+            for quest in quests:
+                if quest.image_url:
                     await context.bot.send_photo(
                         chat_id=query.message.chat_id,
-                        photo=quest_obj.image_url,
-                        caption=f"Title: {quest_obj.title}\n"
-                               f"ID: {quest_obj.id}\n"
-                               f"Description: {quest_obj.description}",
-                        reply_markup=get_quest_list_keyboard([quest_obj])
+                        photo=quest.image_url,
+                        caption=f"Title: {quest.title}\n"
+                               f"Code: {quest.quest_code}\n"
+                               f"Points: {quest.points}\n"
+                               f"Description: {quest.description}",
+                        reply_markup=get_quest_list_keyboard([quest])
                     )
                 else:
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
-                        text=f"Title: {quest_obj.title}\n"
-                             f"ID: {quest_obj.id}\n"
-                             f"Description: {quest_obj.description}",
-                        reply_markup=get_quest_list_keyboard([quest_obj])
+                        text=f"Title: {quest.title}\n"
+                             f"Code: {quest.quest_code}\n"
+                             f"Points: {quest.points}\n"
+                             f"Description: {quest.description}",
+                        reply_markup=get_quest_list_keyboard([quest])
                     )
         else:
             await query.message.edit_text(
@@ -233,20 +263,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     
     elif query.data.startswith("approve_"):
-        submission_id = query.data.split("_")[1]
-        submission = await QuestSubmission.get_submission(submission_id)
+        submission_id = uuid.UUID(query.data.split("_")[1])
+        submission = await Submission.get_by_id(submission_id)
         if submission:
             logger.info(f"Approving submission {submission_id} by admin {query.from_user.id}")
             await submission.update_status("approved", query.from_user.id)
             await context.bot.send_message(
                 chat_id=submission.user_id,
-                text=f"Your submission for quest {submission.quest_id} has been approved! 🎉"
+                text=f"Your submission for quest {submission.quest_id} has been approved! 🎉\n"
+                     f"You earned {submission.quest.points} points!"
             )
             await query.message.edit_text("Submission approved!")
     
     elif query.data.startswith("deny_"):
-        submission_id = query.data.split("_")[1]
-        submission = await QuestSubmission.get_submission(submission_id)
+        submission_id = uuid.UUID(query.data.split("_")[1])
+        submission = await Submission.get_by_id(submission_id)
         if submission:
             logger.info(f"Denying submission {submission_id} by admin {query.from_user.id}")
             await submission.update_status("denied", query.from_user.id)
@@ -255,15 +286,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"Your submission for quest {submission.quest_id} has been denied. Please try again!"
             )
             await query.message.edit_text("Submission denied.")
-    
-    elif query.data == "create_quest":
-        await query.message.edit_text(
-            "Please send the quest details in the following format:\n"
-            "Title: [Quest Title]\n"
-            "Description: [Quest Description]\n\n"
-            "You can also attach an image to the quest."
-        )
-        context.user_data['awaiting_quest'] = True
 
 def setup_handlers(application):
     """Setup all handlers"""

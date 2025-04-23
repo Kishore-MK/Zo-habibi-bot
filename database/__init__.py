@@ -1,4 +1,4 @@
-from .supabase import supabase_client
-from .models import User, Quest, UserProgress
+from .supabase import get_client
+from .models import User, Quest, Submission, LeaderboardEntry
 
-__all__ = ['supabase_client', 'User', 'Quest', 'UserProgress'] 
+__all__ = ['get_client', 'User', 'Quest', 'Submission', 'LeaderboardEntry'] 

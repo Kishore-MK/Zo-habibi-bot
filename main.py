@@ -12,27 +12,48 @@ from database.supabase import test_connection
 setup_logging()
 logger = logging.getLogger(__name__)
 
-def main():
+async def main():
     """Start the bot"""
-    # Test Supabase connection
-    if not asyncio.run(test_connection()):
-        logger.error("Failed to connect to Supabase. Exiting...")
-        return
-    
-    # Create the Application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Setup handlers
-    setup_handlers(application)
-    
-    # Start the bot
-    logger.info("Starting bot...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application = None
+    try:
+        # Test Supabase connection
+        if not await test_connection():
+            logger.error("Failed to connect to Supabase. Exiting...")
+            return
+        
+        # Create the Application
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Setup handlers
+        setup_handlers(application)
+        
+        # Start the bot
+        logger.info("Starting bot...")
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Keep the bot running until interrupted
+        while True:
+            await asyncio.sleep(1)
+            
+    except asyncio.CancelledError:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot stopped due to error: {e}")
+    finally:
+        if application and application.updater:
+            try:
+                await application.updater.stop()
+                await application.stop()
+                await application.shutdown()
+            except Exception as e:
+                logger.error(f"Error during application shutdown: {e}")
 
 if __name__ == '__main__':
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Bot stopped due to error: {e}") 
+        logger.error(f"Fatal error: {e}") 
